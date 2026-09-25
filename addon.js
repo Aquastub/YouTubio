@@ -623,7 +623,7 @@ async function parseMeta(userConfig, video, manifestUrl, protocol, useID, videoI
         getDeArrowThumbnail(video.id, deArrow.thumbnails[0].timestamp) :
         null) ?? video.thumbnail ?? video.thumbnails?.at(-1)?.url;
     return {
-        id: useID ? prefix + video.id : playlist ? prefix + video.url : videoID,
+        id: playlist ? videoID : useID ? prefix + video.id : prefix + video.url,
         type,
         name: deArrow?.titles[0]?.title ?? video.title ?? 'Unknown Title',
         poster: thumbnail ? (thumbnail.startsWith('//') ? 'https:' : '') + thumbnail : undefined,  // Handle YouTube Channel List Relative Thumbnails
@@ -663,7 +663,7 @@ app.get('/:config/catalog/:type/:id/:extra?.json', async (req, res, next) => {
         const canCache = [channelRegex, channelIDRegex, playlistIDRegex, videoIDRegex].map(r => r.test(url)).some(Boolean);
         return res.json({
             metas: (await Promise.all(
-                (playlist ? videos.entries : [videos])
+                (playlist ? [videos] : [videos])
                     .map(video => parseMeta(userConfig, video, toManifestURL(req), protocol, useID, req.params.id, playlist, req.params.type))
             )).filter(meta => meta !== null),
             behaviorHints: { cacheMaxAge: canCache ? process.env.TTL ?? 3600 : 0 }
@@ -761,7 +761,7 @@ app.get('/:config/meta/:type/:id.json', async (req, res, next) => {
         const userConfig = decryptConfig(req.params.config, false);
         const video = await runYtDlpWithAuth(toYouTubeURL(userConfig, req.params.id, {}), req.params.config, [
             '-I', ':100',
-            '--no-playlist'
+            '--yes-playlist'
         ]);
         const useID = video.webpage_url_domain === 'youtube.com';
         const channel = useID && (channelRegex.test(video.id) || channelIDRegex.test(video.id));
@@ -790,39 +790,37 @@ app.get('/:config/meta/:type/:id.json', async (req, res, next) => {
                 ...meta,
                 background: meta.poster,
                 released,
-                videos: [
-                    ...await Promise.all(videos.map(async (video2, episode) => ({
-                        id: `${req.params.id}:1:${episode + 1}`,
-                        title: playlist && episode === 0 ? 'Channel Options' : video2.title,
-                        released,
-                        thumbnail: meta.poster,
-                        streams: await parseStream(userConfig, video2, manifestUrl, protocol, req.protocol, req.get('host')),
+                videos: playlist ? await Promise.all((video.entries ?? []).map(async (video2, episode) => {
+                    let deArrow = null;
+                    try {
+                        if (useID && videoIDRegex.test(video2.id) && userConfig.dearrow)
+                            deArrow = await runDeArrow(video2.id);
+                    } catch (error) {
+                        logError(error);
+                    }
+                    return {
+                        id: prefix + video2.id,
+                        title: deArrow?.titles[0]?.title ?? video2.title ?? 'Unknown Title',
+                        released: parseDate(video2),
+                        thumbnail: (deArrow?.thumbnails[0] ?
+                            getDeArrowThumbnail(video2.id, deArrow.thumbnails[0].timestamp) :
+                            null) ?? video2.thumbnail ?? video2.thumbnails?.at(-1)?.url,
                         available: true,
                         episode: episode + 1,
                         season: 1,
-                        overview: playlist && episode === 0 ? 'Open the channel as a catalog' : video2.description
-                    }))), ...await Promise.all((video.entries?.map(async (video2, episode) => {
-                        let deArrow = null;
-                        try {
-                            if (useID && videoIDRegex.test(video2.id) && userConfig.dearrow)
-                                deArrow = await runDeArrow(video2.id);
-                        } catch (error) {
-                            logError(error);
-                        }
-                        return {
-                            id: prefix + video2.id,
-                            title: deArrow?.titles[0]?.title ?? video2.title ?? 'Unknown Title',
-                            released: parseDate(video2),
-                            thumbnail: (deArrow?.thumbnails[0] ?
-                                getDeArrowThumbnail(video2.id, deArrow.thumbnails[0].timestamp) :
-                                null) ?? video2.thumbnail ?? video2.thumbnails?.at(-1)?.url,
-                            available: true,
-                            episode: episode + videos.length + 1,
-                            season: 1,
-                            overview: video2.description
-                        };
-                    }) ?? []))
-                ],
+                        overview: video2.description
+                    };
+                })) : await Promise.all(videos.map(async (video2, episode) => ({
+                    id: `${req.params.id}:1:${episode + 1}`,
+                    title: video2.title ?? 'Unknown Title',
+                    released,
+                    thumbnail: meta.poster,
+                    streams: await parseStream(userConfig, video2, manifestUrl, protocol, req.protocol, req.get('host')),
+                    available: true,
+                    episode: episode + 1,
+                    season: 1,
+                    overview: video2.description
+                }))),
                 runtime: `${Math.floor((video.duration ?? 0) / 60)} min`,
                 language: video.language,
                 website: video.webpage_url,
